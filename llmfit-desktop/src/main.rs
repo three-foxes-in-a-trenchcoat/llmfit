@@ -1,9 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use llmfit_core::fit::{FitLevel, ModelFit, RunMode};
+use llmfit_core::fit::{FitLevel, InferenceRuntime, ModelFit, RunMode};
 use llmfit_core::hardware::SystemSpecs;
 use llmfit_core::models::ModelDatabase;
+use llmfit_core::providers::{ModelProvider, OllamaProvider, PullEvent};
 use serde::Serialize;
+use std::sync::Mutex;
+use tauri::State;
 
 #[derive(Serialize)]
 struct GpuInfoJs {
@@ -24,7 +27,7 @@ struct SystemInfo {
     unified_memory: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct ModelFitInfo {
     name: String,
     params_b: f64,
@@ -34,9 +37,25 @@ struct ModelFitInfo {
     score: f64,
     memory_required_gb: f64,
     memory_available_gb: f64,
+    utilization_pct: f64,
     estimated_tps: f64,
     use_case: String,
+    runtime: String,
+    installed: bool,
     notes: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct PullStatus {
+    status: String,
+    percent: Option<f64>,
+    done: bool,
+    error: Option<String>,
+}
+
+struct AppState {
+    ollama: OllamaProvider,
+    pull_handle: Mutex<Option<llmfit_core::providers::PullHandle>>,
 }
 
 #[tauri::command]
@@ -97,16 +116,86 @@ fn get_model_fits() -> Result<Vec<ModelFitInfo>, String> {
             score: f.score,
             memory_required_gb: f.memory_required_gb,
             memory_available_gb: f.memory_available_gb,
+            utilization_pct: f.utilization_pct,
             estimated_tps: f.estimated_tps,
             use_case: format!("{:?}", f.use_case),
+            runtime: match f.runtime {
+                InferenceRuntime::LlamaCpp => "llama.cpp".to_string(),
+                InferenceRuntime::Mlx => "MLX".to_string(),
+            },
+            installed: f.installed,
             notes: f.notes.clone(),
         })
         .collect())
 }
 
+#[tauri::command]
+fn start_pull(model_tag: String, state: State<'_, AppState>) -> Result<String, String> {
+    let handle = state.ollama.start_pull(&model_tag)?;
+    let mut pull = state.pull_handle.lock().map_err(|e| e.to_string())?;
+    *pull = Some(handle);
+    Ok("started".to_string())
+}
+
+#[tauri::command]
+fn poll_pull(state: State<'_, AppState>) -> Result<PullStatus, String> {
+    let pull = state.pull_handle.lock().map_err(|e| e.to_string())?;
+    if let Some(ref handle) = *pull {
+        match handle.receiver.try_recv() {
+            Ok(PullEvent::Progress { status, percent }) => Ok(PullStatus {
+                status,
+                percent,
+                done: false,
+                error: None,
+            }),
+            Ok(PullEvent::Done) => Ok(PullStatus {
+                status: "Complete".to_string(),
+                percent: Some(100.0),
+                done: true,
+                error: None,
+            }),
+            Ok(PullEvent::Error(e)) => Ok(PullStatus {
+                status: "Error".to_string(),
+                percent: None,
+                done: true,
+                error: Some(e),
+            }),
+            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(PullStatus {
+                status: "Waiting...".to_string(),
+                percent: None,
+                done: false,
+                error: None,
+            }),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Ok(PullStatus {
+                status: "Complete".to_string(),
+                percent: Some(100.0),
+                done: true,
+                error: None,
+            }),
+        }
+    } else {
+        Err("No pull in progress".to_string())
+    }
+}
+
+#[tauri::command]
+fn is_ollama_available(state: State<'_, AppState>) -> bool {
+    state.ollama.is_available()
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![get_system_specs, get_model_fits])
+        .manage(AppState {
+            ollama: OllamaProvider::new(),
+            pull_handle: Mutex::new(None),
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_system_specs,
+            get_model_fits,
+            start_pull,
+            poll_pull,
+            is_ollama_available,
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
