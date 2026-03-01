@@ -92,6 +92,7 @@ Launches the interactive terminal UI. Your system specs (CPU, RAM, GPU name, VRA
 | `Esc` or `Enter` | Exit search mode |
 | `Ctrl-U` | Clear search |
 | `f` | Cycle fit filter: All, Runnable, Perfect, Good, Marginal |
+| `a` | Cycle availability filter: All, GGUF Avail, Installed |
 | `s` | Cycle sort column: Score, Params, Mem%, Ctx, Date, Use Case |
 | `t` | Cycle color theme (saved automatically) |
 | `p` | Open Plan mode for selected model (hardware planning) |
@@ -308,6 +309,8 @@ cargo build --release
 ```
 
 The scraper writes `data/hf_models.json`, which is baked into the binary via `include_str!`. The automated update script backs up existing data, validates JSON output, and rebuilds the binary.
+
+By default, the scraper enriches models with known GGUF download sources from providers like [unsloth](https://huggingface.co/unsloth) and [bartowski](https://huggingface.co/bartowski). Results are cached in `data/gguf_sources_cache.json` (7-day TTL) to avoid repeated API calls. Use `--no-gguf-sources` to skip enrichment for a faster scrape.
 
 ---
 
